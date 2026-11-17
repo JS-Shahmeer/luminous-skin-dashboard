@@ -32,6 +32,7 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
 
 # vercel
 .vercel
@@ -39,3 +40,19 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# uploaded course content (videos/PDFs) — not committed
+/storage/uploads/
+
+# database backups (scripts/backup-db.sh) — not committed
+/storage/backups/
+
+# real client-provided course videos/images — too large for git, kept on
+# disk only; the seed script reads them from here to populate storage/uploads/
+/prisma/seed-data/assets/intimate-lightening/videos/
+/prisma/seed-data/assets/intimate-lightening/images/
+
+# the raw folder the client originally pasted in — its contents were already
+# copied into prisma/seed-data/assets/intimate-lightening/ above; this is a
+# duplicate copy and should never be committed
+/Intimate lightning course/

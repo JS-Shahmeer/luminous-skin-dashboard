@@ -1,0 +1,254 @@
+LUMINOUS SKN ACADEMY — DEPLOYMENT GUIDE
+=========================================
+Last updated: 21 October 2026
+
+This is a step-by-step guide for deploying this dashboard to a Hostinger VPS
+(or any Ubuntu-based VPS). Written so a developer with basic Linux comfort
+can follow it top to bottom. Items marked [YOU] need something only the
+business owner can provide (an account, a password, a decision) — everything
+else can be done by whoever has SSH access to the server.
+
+
+PART 1 — WHAT YOU NEED BEFORE STARTING
+---------------------------------------
+[YOU] A Hostinger VPS, already provisioned, running Ubuntu 22.04 or 24.04.
+[YOU] A domain name pointed at the VPS (an A record to the VPS's IP address).
+[YOU] SSH access to the VPS (root or a sudo user).
+[YOU] A Stripe account (dashboard.stripe.com) — free to create, no business
+      verification needed just to get TEST keys. Live keys need business
+      verification when you're ready to accept real payments.
+[YOU] Either:
+        (a) a Hostinger email mailbox (hPanel > Emails) to use as the SMTP
+            sender, or
+        (b) credentials for a third-party email service (Resend, Postmark,
+            SendGrid, etc).
+
+
+PART 2 — SERVER SETUP (one-time)
+---------------------------------
+SSH into the VPS, then:
+
+1. Update the system:
+     sudo apt update && sudo apt upgrade -y
+
+2. Install Node.js 24 (via NodeSource):
+     curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash -
+     sudo apt install -y nodejs
+     node -v        # should print v24.x
+
+3. Install MySQL Server:
+     sudo apt install -y mysql-server
+     sudo mysql_secure_installation
+     # Follow the prompts to set a root password and lock down the install.
+
+4. Create the application database and user (replace the password):
+     sudo mysql
+       CREATE DATABASE luminous_academy CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+       CREATE USER 'luminous_app'@'localhost' IDENTIFIED BY 'CHOOSE_A_STRONG_PASSWORD';
+       GRANT ALL PRIVILEGES ON luminous_academy.* TO 'luminous_app'@'localhost';
+       FLUSH PRIVILEGES;
+       EXIT;
+
+5. Install PM2 (keeps the app running, restarts it on crash/reboot):
+     sudo npm install -g pm2
+
+6. Install Nginx (reverse proxy) and Certbot (free SSL):
+     sudo apt install -y nginx certbot python3-certbot-nginx
+
+
+PART 3 — GET THE CODE ONTO THE SERVER
+---------------------------------------
+1. Push this project to a private GitHub/GitLab repo (if not already), or
+   copy it to the server via scp/rsync.
+
+2. On the server:
+     cd /var/www
+     git clone <your-repo-url> luminous-skin-dashboard
+     cd luminous-skin-dashboard
+     npm install
+
+3. Approve any pending install scripts (same as local dev):
+     npm approve-scripts --allow-scripts-pending
+   (Review what it lists before approving — it should only be the usual
+   prisma / esbuild / unrs-resolver entries.)
+
+
+PART 4 — ENVIRONMENT VARIABLES
+---------------------------------
+Create /var/www/luminous-skin-dashboard/.env (copy .env.example as a
+starting point) and fill in real production values:
+
+  DATABASE_URL="mysql://luminous_app:YOUR_PASSWORD@localhost:3306/luminous_academy"
+  AUTH_SECRET="<generate a new one — do NOT reuse the local dev one>"
+     Generate with: openssl rand -base64 32
+
+  NEXT_PUBLIC_APP_URL="https://yourdomain.com"
+
+  STRIPE_SECRET_KEY="sk_live_..."          [YOU — from Stripe dashboard]
+  STRIPE_PUBLISHABLE_KEY="pk_live_..."     [YOU]
+  STRIPE_WEBHOOK_SECRET="whsec_..."        [YOU — see Part 7 below]
+
+  STORAGE_DIR="./storage"
+
+  SMTP_HOST="smtp.hostinger.com"           [YOU — or your email provider's host]
+  SMTP_PORT="587"
+  SMTP_SECURE="false"
+  SMTP_USER="no-reply@yourdomain.com"      [YOU]
+  SMTP_PASS="..."                          [YOU]
+  MAIL_FROM="Luminous SKN Academy <no-reply@yourdomain.com>"
+
+Keep .env out of git — it already is (.gitignore covers it).
+
+
+PART 5 — DATABASE MIGRATION & BUILD
+--------------------------------------
+1. Apply the database schema (does NOT seed demo data — this is production):
+     npx prisma migrate deploy
+     npx prisma generate
+
+2. Create the real admin account. Easiest way: temporarily run the seed
+   script's admin-creation logic by hand, or add one manually:
+     node -e "
+       require('dotenv').config();
+       const bcrypt = require('bcryptjs');
+       const { PrismaClient } = require('@prisma/client');
+       const { PrismaMariaDb } = require('@prisma/adapter-mariadb');
+       const prisma = new PrismaClient({ adapter: new PrismaMariaDb(process.env.DATABASE_URL) });
+       (async () => {
+         const passwordHash = await bcrypt.hash('CHOOSE_A_REAL_PASSWORD', 10);
+         await prisma.user.create({ data: {
+           name: 'Admin', email: 'YOUR_REAL_EMAIL', passwordHash, role: 'ADMIN', title: 'Academy Admin'
+         }});
+         console.log('Admin created.');
+         process.exit(0);
+       })();
+     "
+   Then add courses through /admin/courses/new — do NOT run prisma/seed.ts
+   in production, it wipes all data and fills it with demo content.
+
+3. Build the production bundle:
+     npm run build
+
+4. Create the upload storage folder (gitignored, must exist on the server):
+     mkdir -p storage/uploads
+
+
+PART 6 — RUN THE APP WITH PM2
+--------------------------------
+1. Start it:
+     pm2 start npm --name "luminous-dashboard" -- start
+
+2. Make it survive reboots:
+     pm2 save
+     pm2 startup
+     # Run the command that `pm2 startup` prints out (it's a one-time sudo command).
+
+3. Useful commands:
+     pm2 status
+     pm2 logs luminous-dashboard
+     pm2 restart luminous-dashboard
+
+
+PART 7 — NGINX + HTTPS
+-------------------------
+1. Create /etc/nginx/sites-available/luminous-dashboard:
+
+     server {
+         listen 80;
+         server_name yourdomain.com www.yourdomain.com;
+
+         # Lesson video/PDF uploads from the admin panel can be large —
+         # nginx's default 1MB body limit would block them otherwise.
+         client_max_body_size 500M;
+
+         location / {
+             proxy_pass http://localhost:3000;
+             proxy_http_version 1.1;
+             proxy_set_header Upgrade $http_upgrade;
+             proxy_set_header Connection 'upgrade';
+             proxy_set_header Host $host;
+             proxy_set_header X-Real-IP $remote_addr;
+             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+             proxy_set_header X-Forwarded-Proto $scheme;
+             proxy_cache_bypass $http_upgrade;
+         }
+     }
+
+2. Enable it:
+     sudo ln -s /etc/nginx/sites-available/luminous-dashboard /etc/nginx/sites-enabled/
+     sudo nginx -t
+     sudo systemctl reload nginx
+
+3. Get a free SSL certificate (run this only after DNS is pointing at the
+   server, or it will fail):
+     sudo certbot --nginx -d yourdomain.com -d www.yourdomain.com
+   Certbot auto-renews; no further action needed.
+
+4. Register the Stripe webhook now that you have a real HTTPS URL:
+   Stripe dashboard > Developers > Webhooks > Add endpoint
+     URL: https://yourdomain.com/api/webhooks/stripe
+     Event to send: checkout.session.completed
+   Copy the "Signing secret" it gives you into STRIPE_WEBHOOK_SECRET in
+   .env, then: pm2 restart luminous-dashboard
+
+
+PART 8 — FIREWALL
+--------------------
+     sudo ufw allow OpenSSH
+     sudo ufw allow 'Nginx Full'
+     sudo ufw enable
+MySQL (port 3306) should NOT be open to the internet — it already only
+listens on localhost by default, which is correct. Leave it that way.
+
+
+PART 9 — DATABASE BACKUPS
+----------------------------
+A backup script is included at scripts/backup-db.sh. It dumps the database,
+compresses it, and deletes backups older than 14 days.
+
+1. Make it executable:
+     chmod +x scripts/backup-db.sh
+
+2. Test it once by hand:
+     ./scripts/backup-db.sh
+   Check that a .sql.gz file appears under storage/backups/.
+
+3. Schedule it to run daily at 2am via cron:
+     crontab -e
+   Add this line (adjust the path if your deployment path differs):
+     0 2 * * * /var/www/luminous-skin-dashboard/scripts/backup-db.sh >> /var/log/luminous-backup.log 2>&1
+
+4. IMPORTANT — off-server copies. Backups sitting on the same VPS protect
+   against accidental data deletion, but not against the VPS itself failing.
+   Periodically copy storage/backups/ somewhere else — e.g. download it
+   manually, sync it to Hostinger's own backup/storage feature if available,
+   or set up an rclone job to a cloud storage bucket. This is worth doing
+   properly before this is handling real client payments.
+
+
+PART 10 — UPLOADED CONTENT (videos/PDFs)
+-------------------------------------------
+storage/uploads/ holds every video and PDF admins upload through the course
+manager. It is NOT in git and is NOT covered by Part 9's database backup —
+back it up separately (it can get large). A simple approach:
+     rsync -av storage/uploads/ /path/to/external/backup/location/
+run on the same cron schedule, or included in your off-server copy step
+above.
+
+
+PART 11 — ONGOING: DEPLOYING UPDATES
+---------------------------------------
+When new code is ready to go live:
+     cd /var/www/luminous-skin-dashboard
+     git pull
+     npm install
+     npx prisma migrate deploy
+     npm run build
+     pm2 restart luminous-dashboard
+
+
+QUICK REFERENCE — WHAT'S [YOU] vs DEV
+----------------------------------------
+[YOU] only: Hostinger VPS purchase, domain purchase/DNS, Stripe account +
+keys, email mailbox/SMTP credentials, approving real course content.
+Dev/either: everything else in this document.
