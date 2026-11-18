@@ -1,6 +1,7 @@
 "use client";
 
 import { useActionState } from "react";
+import Link from "next/link";
 import { Lock, Mail } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { loginAction } from "./actions";
@@ -50,9 +51,9 @@ export function LoginForm() {
           <input type="checkbox" defaultChecked className="accent-[#C6A875]" />
           Remember me
         </label>
-        <a href="#" className="text-beige hover:text-gold">
+        <Link href="/forgot-password" className="text-beige hover:text-gold">
           Forgot password?
-        </a>
+        </Link>
       </div>
 
       <Button type="submit" variant="primary" size="lg" className="w-full" disabled={pending}>
